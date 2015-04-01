@@ -140,6 +140,13 @@ namespace Simhash {
     	}
     }
 
+    void Table::insert(hash_t* phash, size_t size) {
+    	hash_t result(0);
+    	for(size_t i = 0; i < size; i++) {
+    		J1S(result, judy, permute(phash[i]));
+    	}
+    }
+
     void Table::insert(hash_t hash) {
     	hash_t result(0);
     	J1S(result, judy, permute(hash));

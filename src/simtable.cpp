@@ -20,11 +20,17 @@ SimTable SimTableInit(long d, LongVector lv) {
 }
 
 void SimTableRelease(SimTable st) {
-    delete TB(st);
+    if (NULL != st) {
+        delete TB(st);
+    }
 }
 
 void SimTableInsert(SimTable st, unsigned long hash) {
     TB(st)->insert(hash);
+}
+
+void SimTableInsertBulk(SimTable st, unsigned long *phash, long size) {
+    TB(st)->insert(phash, size);
 }
 
 void SimTableRemove(SimTable st, unsigned long hash) {
@@ -55,6 +61,10 @@ LongVector LongVectorInit() {
     return new vector<unsigned long>();
 }
 
+void LongVectorReserve(LongVector lv, long s) {
+    VE(lv)->reserve(s);
+}
+
 void LongVectorAdd(LongVector lv, unsigned long v) {
     VE(lv)->push_back(v);
 }
@@ -68,11 +78,20 @@ unsigned long LongVectorGet(LongVector lv, int i) {
 }
 
 void LongVectorRelease(LongVector lv) {
-    delete VE(lv);
+    if (NULL != lv) {
+        delete VE(lv);
+    }
 }
 
 long LongVectorLen(LongVector lv) {
     return VE(lv)->size();
+}
+
+unsigned long* LongVector2Array(LongVector lv, long *inLen) {
+    if (NULL != inLen) {
+        *inLen = VE(lv)->size();
+    }
+    return &((*VE(lv))[0]);
 }
 
 #ifdef __cplusplus

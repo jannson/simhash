@@ -1,10 +1,12 @@
 package simhash
 
 //#include "inc/simtable.h"
-//#cgo LDFLAGS: -L/usr/local/lib -lJudy -L./lib -lsimhash
+//#cgo LDFLAGS: -L/usr/local/lib -lJudy -lsimhash
 import "C"
 import (
 	"fmt"
+	"runtime"
+	"sync"
 	"time"
 	"unsafe"
 )
@@ -14,7 +16,9 @@ type LongVector struct {
 }
 
 type SimTable struct {
-	p unsafe.Pointer
+	p    unsafe.Pointer
+	lock sync.RWMutex
+	//lock sync.Mutex
 }
 
 func NewLongVector() LongVector {
@@ -25,6 +29,10 @@ func NewLongVector() LongVector {
 
 func (v LongVector) Release() {
 	C.LongVectorRelease(v.p)
+}
+
+func (v LongVector) Reserve(size int) {
+	C.LongVectorReserve(v.p, C.long(size))
 }
 
 func (v LongVector) Add(n uint64) {
@@ -39,6 +47,12 @@ func (v LongVector) Get(i int64) uint64 {
 	return uint64(C.LongVectorGet(v.p, C.int(i)))
 }
 
+func (v LongVector) ToArrayPtr() (*C.ulong, int) {
+	var l int64
+	p := C.LongVector2Array(v.p, (*C.long)(unsafe.Pointer(&l)))
+	return p, int(l)
+}
+
 func (v LongVector) Len() int64 {
 	return int64(C.LongVectorLen(v.p))
 }
@@ -50,34 +64,56 @@ func NewSimTable(d int64, v LongVector) SimTable {
 }
 
 func (st SimTable) Release() {
+	st.lock.Lock()
+	defer st.lock.Unlock()
 	C.SimTableRelease(st.p)
 }
 
 func (st SimTable) Find(h uint64) uint64 {
+	st.lock.RLock()
+	defer st.lock.RUnlock()
 	return uint64(C.SimTableFind(st.p, C.ulong(h)))
 }
 
 func (st SimTable) FindM(h uint64, v LongVector) {
+	st.lock.RLock()
+	defer st.lock.RUnlock()
 	C.SimTableFindm(st.p, C.ulong(h), v.p)
 }
 
 func (st SimTable) Insert(h uint64) {
+	st.lock.Lock()
+	defer st.lock.Unlock()
 	C.SimTableInsert(st.p, C.ulong(h))
 }
 
+func (st SimTable) InsertBulk(hashs []uint64) {
+	st.lock.Lock()
+	defer st.lock.Unlock()
+	C.SimTableInsertBulk(st.p, (*C.ulong)(unsafe.Pointer(&hashs[0])), C.long(len(hashs)))
+}
+
 func (st SimTable) Remove(h uint64) {
+	st.lock.Lock()
+	defer st.lock.Unlock()
 	C.SimTableRemove(st.p, C.ulong(h))
 }
 
 func (st SimTable) Permute(h uint64) uint64 {
+	st.lock.Lock()
+	defer st.lock.Unlock()
 	return uint64(C.SimTablePermute(st.p, C.ulong(h)))
 }
 
 func (st SimTable) Unpermute(h uint64) {
+	st.lock.Lock()
+	defer st.lock.Unlock()
 	C.SimTableUnpermute(st.p, C.ulong(h))
 }
 
 func (st SimTable) SearchMask() uint64 {
+	st.lock.RLock()
+	defer st.lock.RUnlock()
 	return uint64(C.SimTableSearchMask(st.p))
 }
 
@@ -158,6 +194,14 @@ func (corpus *Corpus) Insert(hash uint64) {
 	}
 }
 
+func (corpus *Corpus) InsertBulk(hashs []uint64) {
+	for _, tb := range corpus.tables {
+		go func(gtb SimTable) {
+			gtb.InsertBulk(hashs)
+		}(tb)
+	}
+}
+
 func (corpus *Corpus) Remove(hash uint64) {
 	for _, tb := range corpus.tables {
 		tb.Remove(hash)
@@ -176,25 +220,67 @@ func (corpus *Corpus) Find(hash uint64) uint64 {
 
 func (corpus *Corpus) FindAll(hash uint64, f func(uint64)) {
 	//filter := bloom.New(10000000, 5)
-	filter := make(map[uint64]bool)
+	//filter := make(map[uint64]bool)
 	for _, tb := range corpus.tables {
 		lv := NewLongVector()
 		defer lv.Release()
 
+		//start := time.Now()
 		tb.FindM(hash, lv)
-		l := int(lv.Len())
+		//elapsed := time.Since(start)
+		//fmt.Printf("FindM: %v\n", elapsed)
+
+		//start = time.Now()
+		//trick hear
+		p, l := lv.ToArrayPtr()
+		pa := (*[1 << 30]C.ulong)(unsafe.Pointer(p))
 		for i := 0; i < l; i++ {
-			key := lv.Get(int64(i))
+			key := uint64(pa[i])
 			/* kb := make([]byte, 8)
 			binary.LittleEndian.PutUint64(kb, key)
 			if !filter.Test(kb) {
 				filter.Add(kb)
 				f(key)
 			} */
-			if _, ok := filter[key]; !ok {
+			/*if _, ok := filter[key]; !ok {
 				filter[key] = true
 				f(key)
-			}
+			}*/
+			f(key)
+		}
+		//elapsed = time.Since(start)
+		//fmt.Printf("Looop: %v\n", elapsed)
+	}
+}
+
+func (corpus *Corpus) FindParallel(hash uint64, f func(uint64)) {
+	corpusLen := len(corpus.tables)
+	ch := make(chan int, corpusLen)
+
+	lvs := make([]LongVector, corpusLen)
+	for i := 0; i < corpusLen; i++ {
+		lvs[i] = NewLongVector()
+	}
+	defer func() {
+		for _, lv := range lvs {
+			lv.Release()
+		}
+		close(ch)
+	}()
+
+	for idx, tb := range corpus.tables {
+		go func(gst SimTable, i int) {
+			gst.FindM(hash, lvs[i])
+			ch <- i
+		}(tb, idx)
+	}
+
+	for i := 0; i < corpusLen; i++ {
+		idx := <-ch
+		p, l := lvs[idx].ToArrayPtr()
+		pa := (*[1 << 30]C.ulong)(unsafe.Pointer(p))
+		for j := 0; j < l; j++ {
+			f(uint64(pa[j]))
 		}
 	}
 }
@@ -210,24 +296,34 @@ func (corpus *Corpus) Distance(a uint64, b uint64) int {
 }
 
 func mainTest() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	lv := NewLongVector()
 	defer lv.Release()
 
 	lv.Add(4)
+	lv.Add(3)
 	lv.Set(0, 5)
 	fmt.Println(lv.Get(0))
 	fmt.Println(lv.Len())
+	//trick hear
+	pa, l := lv.ToArrayPtr()
+	npa := (*[1 << 30]C.ulong)(unsafe.Pointer(pa))
+	fmt.Printf("ToArray:%v, %v, %v\n", *pa, npa[1], l)
 
 	b := 15
-	x := NewCorpus(12, 11)
+	x := NewCorpus(b+1, b)
 	defer x.Release()
 
 	start := time.Now()
 
+	begin := 800
 	end := 1800000
+	hashs := make([]uint64, end-begin)
 	for j := 800; j < end; j++ {
-		x.Insert(uint64(j))
+		hashs[j-begin] = uint64(j)
 	}
+	x.InsertBulk(hashs)
 
 	elapsed := time.Since(start)
 	fmt.Printf("Insert: %v\n", elapsed)
@@ -238,7 +334,7 @@ func mainTest() {
 	start = time.Now()
 
 	z := uint64(9001)
-	for j := 800; j < end; j++ {
+	for j := begin; j < end; j++ {
 		if x.Distance(z, (uint64(j))) <= b {
 			m1[uint64(j)] = true
 		}
@@ -248,12 +344,14 @@ func mainTest() {
 	fmt.Printf("ShowAll: %v\n", elapsed)
 
 	start = time.Now()
-	x.FindAll(z, func(ret uint64) {
+	i := 0
+	x.FindParallel(z, func(ret uint64) {
 		m2[ret] = true
+		i++
 	})
 
 	elapsed = time.Since(start)
 	fmt.Printf("FindAll: %v\n", elapsed)
 
-	fmt.Printf("Len1:%d Len2:%d\n", len(m1), len(m2))
+	fmt.Printf("Len1:%d Len2:%d len3:%d\n", len(m1), len(m2), i)
 }

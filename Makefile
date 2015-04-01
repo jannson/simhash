@@ -23,6 +23,7 @@ default: $(OUT)
 
 $(OUT): $(OBJS)
 	$(CC) $(LDFLAGS) -shared -o $@ $^
+	sudo cp $(OUT) /usr/local/lib/
 
 obj/simhashgo_wrap.o: simhashgo_wrap.cxx inc/simtable.h
 	$(CC) $(CXXFLAGS) $(INCLUDES) -include ./$(INCPATH)/simtable.h -fpic -c $< -o $@
