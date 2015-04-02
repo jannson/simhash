@@ -88,6 +88,9 @@ func (st SimTable) Insert(h uint64) {
 }
 
 func (st SimTable) InsertBulk(hashs []uint64) {
+	if len(hashs) == 0 {
+		return
+	}
 	st.lock.Lock()
 	defer st.lock.Unlock()
 	C.SimTableInsertBulk(st.p, (*C.ulong)(unsafe.Pointer(&hashs[0])), C.long(len(hashs)))
