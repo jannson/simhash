@@ -195,10 +195,22 @@ func (corpus *Corpus) Insert(hash uint64) {
 }
 
 func (corpus *Corpus) InsertBulk(hashs []uint64) {
-	for _, tb := range corpus.tables {
+	corpusLen := len(corpus.tables)
+	ch := make(chan int, corpusLen)
+	defer func() {
+		close(ch)
+	}()
+
+	for i, tb := range corpus.tables {
 		go func(gtb SimTable) {
 			gtb.InsertBulk(hashs)
+			ch <- i
 		}(tb)
+	}
+
+	//Wait for all ok
+	for n := 0; n < corpusLen; n++ {
+		<-ch
 	}
 }
 
